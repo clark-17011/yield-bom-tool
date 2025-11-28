@@ -454,7 +454,7 @@ with tab1:
         if sheet_count > 0:
             col_left.success(f"已載入 {len(yield_files)} 個檔案，共 {sheet_count} 個 Sheet")
     
-with col_right:
+    with col_right:
         st.subheader("2. 分析儀表板")
         
         # 檢查 Session State 是否有搜尋結果

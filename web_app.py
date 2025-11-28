@@ -454,51 +454,96 @@ with tab1:
         if sheet_count > 0:
             col_left.success(f"已載入 {len(yield_files)} 個檔案，共 {sheet_count} 個 Sheet")
     
-    with col_right:
-        st.subheader("2. 分析結果")
+with col_right:
+        st.subheader("2. 分析儀表板")
         
+        # 檢查 Session State 是否有搜尋結果
         if btn_search_yield and yield_files:
             if not raw_search.strip():
                 st.warning("請輸入關鍵字")
             else:
                 configs = parse_search_config(raw_search, chk_space)
-                # 執行搜尋
                 with st.spinner("搜尋運算中..."):
                     df_res, missing = execute_yield_search(yield_raw_data, yield_row_texts, configs)
                 
                 if missing:
-                    st.error(f"未找到: {', '.join(missing)}")
+                    st.error(f"⚠️ 未找到: {', '.join(missing)}")
                 
                 if not df_res.empty:
                     st.success(f"找到 {len(df_res)} 筆資料")
-                    
-                    # 存入 Session State 以便後續繪圖使用 (避免重整消失)
+                    # 嘗試自動轉換日期欄位 (為了後續篩選)
+                    for col in df_res.columns:
+                        if "DATE" in col.upper() or "TIME" in col.upper() or "日期" in col:
+                            try:
+                                df_res[col] = pd.to_datetime(df_res[col], errors='coerce')
+                            except: pass
                     st.session_state['yield_result'] = df_res
                 else:
                     st.info("無符合資料")
                     st.session_state['yield_result'] = pd.DataFrame()
 
-        # 顯示結果 (如果有)
+        # --- 若有資料，顯示進階儀表板 ---
         if 'yield_result' in st.session_state and not st.session_state['yield_result'].empty:
-            df_display = st.session_state['yield_result']
+            full_df = st.session_state['yield_result']
             
-            # 分頁：數據 vs 圖表
-            sub_t1, sub_t2 = st.tabs(["詳細數據", "統計圖表"])
+            # === 區域 A: 資料篩選 (恢復原本的篩選功能) ===
+            with st.expander("🔻 資料篩選器 (Filter)", expanded=True):
+                f_col1, f_col2, f_col3 = st.columns(3)
+                
+                # 1. 關鍵字篩選
+                all_keywords = ["(全部)"] + sorted(list(full_df['MatchedKeyword'].unique()))
+                sel_keyword = f_col1.selectbox("搜尋對象", all_keywords)
+                
+                # 2. Sheet 篩選
+                all_sheets = ["(全部)"] + sorted(list(full_df['SheetName'].unique()))
+                sel_sheet = f_col2.selectbox("Sheet", all_sheets)
+                
+                # 3. 時間篩選
+                date_cols = [c for c in full_df.columns if pd.api.types.is_datetime64_any_dtype(full_df[c])]
+                sel_date_col = f_col3.selectbox("時間欄位", ["(不篩選)"] + date_cols)
+                
+                # 執行篩選邏輯
+                filtered_df = full_df.copy()
+                if sel_keyword != "(全部)":
+                    filtered_df = filtered_df[filtered_df['MatchedKeyword'] == sel_keyword]
+                if sel_sheet != "(全部)":
+                    filtered_df = filtered_df[filtered_df['SheetName'] == sel_sheet]
+                
+                if sel_date_col != "(不篩選)":
+                    min_date = filtered_df[sel_date_col].min()
+                    max_date = filtered_df[sel_date_col].max()
+                    if pd.notnull(min_date) and pd.notnull(max_date):
+                        # 轉換為 python date object 以供 slider 使用
+                        start_d, end_d = st.date_input(
+                            "選擇日期區間",
+                            value=(min_date, max_date),
+                            min_value=min_date,
+                            max_value=max_date
+                        )
+                        # 過濾資料
+                        filtered_df = filtered_df[
+                            (filtered_df[sel_date_col].dt.date >= start_d) & 
+                            (filtered_df[sel_date_col].dt.date <= end_d)
+                        ]
+
+                st.caption(f"目前顯示: {len(filtered_df)} 筆 (總共 {len(full_df)} 筆)")
+
+            # === 區域 B: 分頁顯示 (數據 / 圖表) ===
+            sub_t1, sub_t2 = st.tabs(["📋 詳細數據", "📊 統計分析"])
             
+            # --- Tab 1: 詳細數據 ---
             with sub_t1:
-                st.dataframe(df_display, use_container_width=True)
+                st.dataframe(filtered_df, use_container_width=True)
                 
                 # Excel 下載
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    # 簡單格式化邏輯
-                    unique_sheets = df_display['SheetName'].unique()
-                    for s_name in unique_sheets:
-                        sub_df = df_display[df_display['SheetName'] == s_name]
-                        # 移除全空欄位
-                        sub_df = sub_df.dropna(axis=1, how='all')
+                    unique_sheets_export = filtered_df['SheetName'].unique()
+                    for s_name in unique_sheets_export:
+                        sub_df_export = filtered_df[filtered_df['SheetName'] == s_name]
+                        sub_df_export = sub_df_export.dropna(axis=1, how='all')
                         safe_name = str(s_name)[:30]
-                        sub_df.to_excel(writer, sheet_name=safe_name, index=False)
+                        sub_df_export.to_excel(writer, sheet_name=safe_name, index=False)
                 
                 st.download_button(
                     label="📥 下載 Excel 結果",
@@ -507,49 +552,124 @@ with tab1:
                     mime="application/vnd.ms-excel"
                 )
 
+            # --- Tab 2: 統計分析 (恢復雙軸圖表) ---
             with sub_t2:
-                st.markdown("#### 繪圖設定")
-                c1, c2, c3, c4 = st.columns(4)
+                # 找出可用欄位
+                num_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
+                all_cols = filtered_df.columns.tolist()
                 
-                # 篩選數值與類別欄位
-                num_cols = df_display.select_dtypes(include=['number']).columns.tolist()
-                all_cols = df_display.columns.tolist()
+                # 模式切換
+                chart_mode = st.radio("圖表模式", ["單軸圖表 (Standard)", "雙軸組合圖 (Combo)"], horizontal=True)
                 
-                chart_type = c1.selectbox("圖表類型", ["Bar (長條)", "Line (折線)", "Pie (圓餅)", "Scatter (散佈)"])
-                x_axis = c2.selectbox("X 軸 (分組)", all_cols, index=0)
-                y_axis = c3.selectbox("Y 軸 (數值)", num_cols if num_cols else all_cols, index=0)
-                agg_func = c4.selectbox("計算方式", ["Sum", "Mean", "Count", "Max"])
+                fig, ax = plt.subplots(figsize=(8, 4))
+                has_plot = False
                 
-                if st.button("更新圖表"):
-                    try:
-                        fig, ax = plt.subplots(figsize=(8, 4))
+                if chart_mode == "單軸圖表 (Standard)":
+                    c1, c2, c3, c4 = st.columns(4)
+                    chart_type = c1.selectbox("類型", ["Bar", "Line", "Pie", "Scatter"])
+                    x_axis = c2.selectbox("X 軸", all_cols, index=0)
+                    y_axis = c3.selectbox("Y 軸", ["(計數)"] + num_cols, index=0)
+                    sort_col = c4.selectbox("排序依據", ["(X軸自動)", "(Y軸數值)"] + all_cols)
+                    
+                    if st.button("繪製圖表", key="btn_std_chart"):
+                        plot_df = filtered_df.copy()
                         
-                        # 簡易資料處理
-                        chart_df = df_display.copy()
-                        # 嘗試轉數值
-                        chart_df[y_axis] = pd.to_numeric(chart_df[y_axis], errors='coerce').fillna(0)
-                        
-                        if agg_func == "Count":
-                            data = chart_df[x_axis].value_counts()
+                        # 處理排序
+                        if sort_col == "(X軸自動)":
+                            plot_df = plot_df.sort_values(by=x_axis)
+                        elif sort_col == "(Y軸數值)" and y_axis != "(計數)":
+                            plot_df = plot_df.sort_values(by=y_axis)
+                        elif sort_col in plot_df.columns:
+                            plot_df = plot_df.sort_values(by=sort_col)
+
+                        # 資料聚合
+                        if y_axis == "(計數)":
+                            data = plot_df[x_axis].value_counts(sort=False) # sort=False to keep df order
+                            # value_counts index is x_axis
+                            if sort_col == "(X軸自動)": data = data.sort_index()
                         else:
-                            agg_map = {"Sum": "sum", "Mean": "mean", "Max": "max"}
-                            data = chart_df.groupby(x_axis)[y_axis].agg(agg_map[agg_func])
+                            # 轉數值
+                            plot_df[y_axis] = pd.to_numeric(plot_df[y_axis], errors='coerce').fillna(0)
+                            data = plot_df.groupby(x_axis)[y_axis].mean() # 預設用 Mean，可視需求改
                         
-                        if chart_type == "Bar (長條)":
-                            data.plot(kind='bar', ax=ax, color='#007AFF')
-                        elif chart_type == "Line (折線)":
-                            data.plot(kind='line', marker='o', ax=ax, color='#007AFF')
-                        elif chart_type == "Pie (圓餅)":
+                        # 繪圖
+                        color = '#007AFF'
+                        if chart_type == "Bar": data.plot(kind='bar', ax=ax, color=color)
+                        elif chart_type == "Line": data.plot(kind='line', marker='o', ax=ax, color=color)
+                        elif chart_type == "Pie": 
                             data.plot(kind='pie', autopct='%1.1f%%', ax=ax)
                             ax.set_ylabel('')
-                        elif chart_type == "Scatter (散佈)":
-                            ax.scatter(chart_df[x_axis], chart_df[y_axis], color='#007AFF')
+                        elif chart_type == "Scatter":
+                            # Scatter 需要原始資料，不聚合
+                            ax.scatter(plot_df[x_axis], plot_df[y_axis], color=color)
+                            
+                        ax.set_title(f"{y_axis} by {x_axis}")
+                        has_plot = True
 
-                        ax.set_title(f"{agg_func} of {y_axis} by {x_axis}")
-                        plt.tight_layout()
-                        st.pyplot(fig)
-                    except Exception as e:
-                        st.error(f"繪圖失敗: {e}")
+                else: # 雙軸組合圖 (Combo)
+                    c1, c2, c3 = st.columns(3)
+                    x_axis = c1.selectbox("X 軸 (分組)", all_cols, index=0)
+                    
+                    # 處理左軸
+                    c_left1, c_left2 = c2.columns(2)
+                    y1_axis = c_left1.selectbox("左軸數值 (Y1)", num_cols, index=0 if len(num_cols)>0 else 0)
+                    y1_type = c_left2.selectbox("左軸類型", ["Bar", "Line", "Area"])
+                    
+                    # 處理右軸
+                    c_right1, c_right2 = c3.columns(2)
+                    y2_axis = c_right1.selectbox("右軸數值 (Y2)", num_cols, index=1 if len(num_cols)>1 else 0)
+                    y2_type = c_right2.selectbox("右軸類型", ["Line", "Bar", "Area"])
+
+                    if st.button("繪製組合圖", key="btn_combo_chart"):
+                        plot_df = filtered_df.copy()
+                        # 預設依 X 軸排序
+                        try:
+                            plot_df = plot_df.sort_values(by=x_axis)
+                        except: pass
+                        
+                        # 轉數值
+                        plot_df[y1_axis] = pd.to_numeric(plot_df[y1_axis], errors='coerce').fillna(0)
+                        plot_df[y2_axis] = pd.to_numeric(plot_df[y2_axis], errors='coerce').fillna(0)
+                        
+                        # 聚合資料 (預設 Mean)
+                        g = plot_df.groupby(x_axis).agg({y1_axis:'mean', y2_axis:'mean'}).reset_index()
+                        
+                        x_data = g[x_axis].astype(str).tolist()
+                        y1_data = g[y1_axis].tolist()
+                        y2_data = g[y2_axis].tolist()
+                        
+                        # 繪製左軸
+                        color1 = '#0A84FF'
+                        if y1_type == "Bar": ax.bar(x_data, y1_data, color=color1, alpha=0.6, label=y1_axis)
+                        elif y1_type == "Line": ax.plot(x_data, y1_data, color=color1, marker='o', label=y1_axis)
+                        elif y1_type == "Area": ax.fill_between(x_data, y1_data, color=color1, alpha=0.4, label=y1_axis)
+                        
+                        ax.set_ylabel(y1_axis, color=color1, fontweight='bold')
+                        ax.tick_params(axis='y', labelcolor=color1)
+                        ax.set_xticklabels(x_data, rotation=45, ha='right')
+
+                        # 繪製右軸
+                        ax2 = ax.twinx()
+                        color2 = '#FF453A'
+                        if y2_type == "Bar": ax2.bar(x_data, y2_data, color=color2, alpha=0.6, width=0.4, label=y2_axis)
+                        elif y2_type == "Line": ax2.plot(x_data, y2_data, color=color2, marker='s', linewidth=2, label=y2_axis)
+                        elif y2_type == "Area": ax2.fill_between(x_data, y2_data, color=color2, alpha=0.3, label=y2_axis)
+                        
+                        ax2.set_ylabel(y2_axis, color=color2, fontweight='bold')
+                        ax2.tick_params(axis='y', labelcolor=color2)
+                        
+                        ax.set_title(f"{y1_axis} & {y2_axis} by {x_axis}")
+                        
+                        # 合併圖例
+                        lines1, labels1 = ax.get_legend_handles_labels()
+                        lines2, labels2 = ax2.get_legend_handles_labels()
+                        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                        
+                        has_plot = True
+
+                if has_plot:
+                    plt.tight_layout()
+                    st.pyplot(fig)
 
 
 # --- TAB 2: BOM Search ---

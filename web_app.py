@@ -148,14 +148,12 @@ def execute_yield_search(raw_data, row_texts, configs):
     found_display_names = set()
     
     # 遍歷所有已讀取的 Sheet
-    # row_texts 結構: [{"label":..., "sheet":..., "texts": [...]}, ...]
     for idx, sheet_info in enumerate(row_texts):
         label = sheet_info["label"]
         sheet_name = sheet_info["sheet"]
         sheet_norm_texts = sheet_info["texts"]
         
         # 取得對應的原始資料
-        # raw_data 結構與 row_texts 索引對應 (因為是順序讀取的)
         header = raw_data[idx]["header"]
         all_rows = raw_data[idx]["rows"]
         
@@ -424,11 +422,7 @@ def extract_bom_data(header, row, label, term):
 # 3. Streamlit UI 主程式
 # ==========================================
 
-st.set_page_config(page_title="Yield & BOM Tool", layout="wide", page_icon="📊")
-
-st.title("📊 良率報表 & BOM 搜尋工具")
-st.caption("支援 Excel 拖曳上傳 | 多檔案搜尋 | 自動彙整")
-
+# (UI 入口已整合在上方，這裡直接接 Tabs 邏輯)
 tab1, tab2 = st.tabs(["📈 Yield Analysis", "🔍 BOM Search"])
 
 # --- TAB 1: Yield Analysis ---
@@ -497,7 +491,7 @@ with tab1:
         if 'yield_result' in st.session_state and not st.session_state['yield_result'].empty:
             full_df = st.session_state['yield_result']
             
-            # === 區域 A: 資料篩選 (恢復原本的篩選功能) ===
+            # === 區域 A: 資料篩選 ===
             with st.expander("🔻 資料篩選器 (Filter)", expanded=True):
                 f_col1, f_col2, f_col3 = st.columns(3)
                 
@@ -524,14 +518,12 @@ with tab1:
                     min_date = filtered_df[sel_date_col].min()
                     max_date = filtered_df[sel_date_col].max()
                     if pd.notnull(min_date) and pd.notnull(max_date):
-                        # 轉換為 python date object 以供 slider 使用
                         start_d, end_d = st.date_input(
                             "選擇日期區間",
                             value=(min_date, max_date),
                             min_value=min_date,
                             max_value=max_date
                         )
-                        # 過濾資料
                         filtered_df = filtered_df[
                             (filtered_df[sel_date_col].dt.date >= start_d) & 
                             (filtered_df[sel_date_col].dt.date <= end_d)
@@ -539,10 +531,9 @@ with tab1:
 
                 st.caption(f"目前顯示: {len(filtered_df)} 筆 (總共 {len(full_df)} 筆)")
 
-            # === 區域 B: 分頁顯示 (數據 / 圖表) ===
+            # === 區域 B: 分頁顯示 ===
             sub_t1, sub_t2 = st.tabs(["📋 詳細數據", "📊 統計分析"])
             
-            # --- Tab 1: 詳細數據 ---
             with sub_t1:
                 st.dataframe(filtered_df, use_container_width=True)
                 
@@ -563,13 +554,11 @@ with tab1:
                     mime="application/vnd.ms-excel"
                 )
 
-            # --- Tab 2: 統計分析 (恢復雙軸圖表) ---
             with sub_t2:
-                # 找出可用欄位
+                # 統計圖表
                 num_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
                 all_cols = filtered_df.columns.tolist()
                 
-                # 模式切換
                 chart_mode = st.radio("圖表模式", ["單軸圖表 (Standard)", "雙軸組合圖 (Combo)"], horizontal=True)
                 
                 fig, ax = plt.subplots(figsize=(8, 4))
@@ -584,8 +573,6 @@ with tab1:
                     
                     if st.button("繪製圖表", key="btn_std_chart"):
                         plot_df = filtered_df.copy()
-                        
-                        # 處理排序
                         if sort_col == "(X軸自動)":
                             plot_df = plot_df.sort_values(by=x_axis)
                         elif sort_col == "(Y軸數值)" and y_axis != "(計數)":
@@ -593,17 +580,13 @@ with tab1:
                         elif sort_col in plot_df.columns:
                             plot_df = plot_df.sort_values(by=sort_col)
 
-                        # 資料聚合
                         if y_axis == "(計數)":
-                            data = plot_df[x_axis].value_counts(sort=False) # sort=False to keep df order
-                            # value_counts index is x_axis
+                            data = plot_df[x_axis].value_counts(sort=False)
                             if sort_col == "(X軸自動)": data = data.sort_index()
                         else:
-                            # 轉數值
                             plot_df[y_axis] = pd.to_numeric(plot_df[y_axis], errors='coerce').fillna(0)
-                            data = plot_df.groupby(x_axis)[y_axis].mean() # 預設用 Mean，可視需求改
+                            data = plot_df.groupby(x_axis)[y_axis].mean()
                         
-                        # 繪圖
                         color = '#007AFF'
                         if chart_type == "Bar": data.plot(kind='bar', ax=ax, color=color)
                         elif chart_type == "Line": data.plot(kind='line', marker='o', ax=ax, color=color)
@@ -611,71 +594,54 @@ with tab1:
                             data.plot(kind='pie', autopct='%1.1f%%', ax=ax)
                             ax.set_ylabel('')
                         elif chart_type == "Scatter":
-                            # Scatter 需要原始資料，不聚合
                             ax.scatter(plot_df[x_axis], plot_df[y_axis], color=color)
                             
                         ax.set_title(f"{y_axis} by {x_axis}")
                         has_plot = True
 
-                else: # 雙軸組合圖 (Combo)
+                else: # Combo
                     c1, c2, c3 = st.columns(3)
                     x_axis = c1.selectbox("X 軸 (分組)", all_cols, index=0)
-                    
-                    # 處理左軸
                     c_left1, c_left2 = c2.columns(2)
                     y1_axis = c_left1.selectbox("左軸數值 (Y1)", num_cols, index=0 if len(num_cols)>0 else 0)
                     y1_type = c_left2.selectbox("左軸類型", ["Bar", "Line", "Area"])
-                    
-                    # 處理右軸
                     c_right1, c_right2 = c3.columns(2)
                     y2_axis = c_right1.selectbox("右軸數值 (Y2)", num_cols, index=1 if len(num_cols)>1 else 0)
                     y2_type = c_right2.selectbox("右軸類型", ["Line", "Bar", "Area"])
 
                     if st.button("繪製組合圖", key="btn_combo_chart"):
                         plot_df = filtered_df.copy()
-                        # 預設依 X 軸排序
-                        try:
-                            plot_df = plot_df.sort_values(by=x_axis)
+                        try: plot_df = plot_df.sort_values(by=x_axis)
                         except: pass
                         
-                        # 轉數值
                         plot_df[y1_axis] = pd.to_numeric(plot_df[y1_axis], errors='coerce').fillna(0)
                         plot_df[y2_axis] = pd.to_numeric(plot_df[y2_axis], errors='coerce').fillna(0)
                         
-                        # 聚合資料 (預設 Mean)
                         g = plot_df.groupby(x_axis).agg({y1_axis:'mean', y2_axis:'mean'}).reset_index()
-                        
                         x_data = g[x_axis].astype(str).tolist()
                         y1_data = g[y1_axis].tolist()
                         y2_data = g[y2_axis].tolist()
                         
-                        # 繪製左軸
                         color1 = '#0A84FF'
                         if y1_type == "Bar": ax.bar(x_data, y1_data, color=color1, alpha=0.6, label=y1_axis)
                         elif y1_type == "Line": ax.plot(x_data, y1_data, color=color1, marker='o', label=y1_axis)
                         elif y1_type == "Area": ax.fill_between(x_data, y1_data, color=color1, alpha=0.4, label=y1_axis)
-                        
                         ax.set_ylabel(y1_axis, color=color1, fontweight='bold')
                         ax.tick_params(axis='y', labelcolor=color1)
                         ax.set_xticklabels(x_data, rotation=45, ha='right')
 
-                        # 繪製右軸
                         ax2 = ax.twinx()
                         color2 = '#FF453A'
                         if y2_type == "Bar": ax2.bar(x_data, y2_data, color=color2, alpha=0.6, width=0.4, label=y2_axis)
                         elif y2_type == "Line": ax2.plot(x_data, y2_data, color=color2, marker='s', linewidth=2, label=y2_axis)
                         elif y2_type == "Area": ax2.fill_between(x_data, y2_data, color=color2, alpha=0.3, label=y2_axis)
-                        
                         ax2.set_ylabel(y2_axis, color=color2, fontweight='bold')
                         ax2.tick_params(axis='y', labelcolor=color2)
                         
                         ax.set_title(f"{y1_axis} & {y2_axis} by {x_axis}")
-                        
-                        # 合併圖例
                         lines1, labels1 = ax.get_legend_handles_labels()
                         lines2, labels2 = ax2.get_legend_handles_labels()
                         ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-                        
                         has_plot = True
 
                 if has_plot:

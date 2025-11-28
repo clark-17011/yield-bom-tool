@@ -1,4 +1,12 @@
 import streamlit as st
+
+# 1. 先設定頁面，讓使用者立刻看到東西
+st.set_page_config(page_title="Yield & BOM Tool", layout="wide", page_icon="📊")
+st.title("📊 良率報表 & BOM 搜尋工具")
+status_text = st.empty() # 佔位符
+status_text.caption("🚀 正在啟動分析引擎，請稍候...")
+
+# 2. 接著才匯入重型套件
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -9,6 +17,9 @@ import io
 import matplotlib.pyplot as plt
 import matplotlib
 import platform
+
+# 3. 載入完畢，清除提示
+status_text.empty()
 
 # ==========================================
 # 0. 基礎設定與工具 (Shared Utilities)

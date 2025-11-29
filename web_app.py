@@ -1,12 +1,4 @@
 import streamlit as st
-
-# 1. 先設定頁面，讓使用者立刻看到東西
-st.set_page_config(page_title="Yield & BOM Tool", layout="wide", page_icon="📊")
-st.title("📊 良率報表 & BOM 搜尋工具")
-status_text = st.empty() # 佔位符
-status_text.caption("🚀 正在啟動分析引擎，請稍候...")
-
-# 2. 接著才匯入重型套件
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -17,23 +9,104 @@ import io
 import matplotlib.pyplot as plt
 import matplotlib
 import platform
-
-# 3. 載入完畢，清除提示
-status_text.empty()
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ==========================================
-# 0. 基礎設定與工具 (Shared Utilities)
+# 1. 頁面設定
+# ==========================================
+st.set_page_config(page_title="Yield & BOM Tool", layout="wide", page_icon="📊")
+
+# 初始化 Session
+if 'exp_yield_open' not in st.session_state: st.session_state['exp_yield_open'] = True
+if 'exp_bom_open' not in st.session_state: st.session_state['exp_bom_open'] = True
+
+# ==========================================
+# CSS 優化 (v4.2 樣式保持不變)
+# ==========================================
+st.markdown("""
+    <style>
+        header[data-testid="stHeader"] {
+            background-color: transparent !important;
+            border-bottom: none !important;
+            pointer-events: none !important;
+            z-index: 100 !important;
+        }
+        [data-testid="stDecoration"], [data-testid="stToolbar"] { display: none !important; }
+        
+        button[data-testid="baseButton-header"], button[data-testid="stSidebarCollapsedControl"] {
+            display: block !important;
+            visibility: visible !important;
+            pointer-events: auto !important;
+            color: #444 !important;
+            background-color: rgba(255, 255, 255, 0.6) !important;
+            border-radius: 50%;
+            margin-top: 0.5rem;
+        }
+
+        .block-container {
+            padding-top: 3rem !important;
+            padding-bottom: 2rem !important;
+            padding-left: 3rem !important;
+            padding-right: 3rem !important;
+        }
+        
+        .streamlit-expanderHeader {
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+
+        section[data-testid="stSidebar"] .block-container {
+            padding-left: 0rem !important;
+            padding-right: 0rem !important;
+            padding-top: 4rem !important;
+        }
+        section[data-testid="stSidebar"] h1, 
+        section[data-testid="stSidebar"] .stMarkdown,
+        section[data-testid="stSidebar"] hr,
+        section[data-testid="stSidebar"] .stCaption {
+            padding-left: 1.5rem !important;
+            padding-right: 1.5rem !important;
+        }
+
+        section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label > div:first-child {
+            display: none !important;
+        }
+        section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label {
+            width: 100% !important;
+            padding: 15px 20px 15px 24px !important;
+            margin: 0px !important;
+            border: none !important;
+            display: flex !important;
+            font-size: 16px !important;
+            transition: background-color 0.2s;
+        }
+        section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
+            background-color: rgba(0, 0, 0, 0.05) !important;
+        }
+        section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:has(input:checked) {
+            background-color: transparent !important;
+            color: #000000 !important;
+            font-weight: 700 !important;
+            border-left: 5px solid #ff4b4b !important;
+        }
+        footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 0. 基礎設定與工具
 # ==========================================
 
-# 設定 Matplotlib 字型以免中文亂碼
 def configure_chart_font():
     system_name = platform.system()
     if system_name == "Windows":
         plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial']
-    elif system_name == "Darwin": # macOS
+    elif system_name == "Darwin": 
         plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'PingFang TC', 'Heiti TC']
     else:
-        # Linux / Streamlit Cloud 通常是 Linux
         plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False 
 
@@ -44,7 +117,9 @@ def normalize_str(x) -> str:
     s = str(x)
     s = unicodedata.normalize("NFKC", s)
     s = s.strip()
-    s = re.sub(r"[^A-Za-z0-9]", "", s)
+    # [修正] 允許中文 (\u4e00-\u9fa5) 通過，只移除其他特殊符號
+    # 這樣 "錫膏" 就不會變成 "" (空字串)
+    s = re.sub(r"[^A-Za-z0-9\u4e00-\u9fa5]", "", s)
     return s.lower()
 
 def parse_search_config(raw_text: str, is_space_or_mode: bool):
@@ -84,16 +159,13 @@ def parse_search_config(raw_text: str, is_space_or_mode: bool):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_yield_files(uploaded_files):
-    """
-    讀取 Yield Report Excel 檔案，建立原始資料與搜尋索引
-    """
-    raw_data = [] # 存放 (label, sheet_name, header, data_rows)
-    row_texts = [] # 存放 (label, sheet_name, normalized_texts_list)
-    
+    raw_data = [] 
+    row_texts = [] 
     total_sheets = 0
     
     for file in uploaded_files:
-        label = file.name # 使用檔名作為標籤
+        name = file.name
+        label = "CPC" if "CPC" in name.upper() else ("HELE" if "HELE" in name.upper() else name)
         try:
             wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
             for sheet_name in wb.sheetnames:
@@ -104,60 +176,36 @@ def load_yield_files(uploaded_files):
                     header = rows[0]
                     data_rows = rows[1:]
                     if not data_rows: continue
-                    
-                    # 儲存原始數據
-                    raw_data.append({
-                        "label": label,
-                        "sheet": sheet_name,
-                        "header": header,
-                        "rows": data_rows
-                    })
-                    
-                    # 建立搜尋索引 (正規化字串)
+                    raw_data.append({"label": label, "sheet": sheet_name, "header": header, "rows": data_rows})
                     current_sheet_texts = []
                     for row in data_rows:
                         joined = "".join([str(c) if c is not None else "" for c in row])
                         current_sheet_texts.append(normalize_str(joined))
-                    
-                    row_texts.append({
-                        "label": label,
-                        "sheet": sheet_name,
-                        "texts": current_sheet_texts
-                    })
+                    row_texts.append({"label": label, "sheet": sheet_name, "texts": current_sheet_texts})
                     total_sheets += 1
                 except: pass
             wb.close()
-        except Exception as e:
-            print(f"Error loading {label}: {e}")
+        except Exception as e: print(f"Error loading {label}: {e}")
             
     return raw_data, row_texts, total_sheets
 
 def execute_yield_search(raw_data, row_texts, configs):
-    """
-    執行 Yield 搜尋
-    """
     if not configs: return pd.DataFrame(), set()
-
     prepared_configs = []
     for cfg in configs:
         norm_terms = [normalize_str(t) for t in cfg['terms'] if t.strip()]
-        if norm_terms:
-            prepared_configs.append({'display': cfg['display'], 'terms': norm_terms})
+        if norm_terms: prepared_configs.append({'display': cfg['display'], 'terms': norm_terms})
 
     all_rows_data = []
     found_display_names = set()
     
-    # 遍歷所有已讀取的 Sheet
     for idx, sheet_info in enumerate(row_texts):
         label = sheet_info["label"]
         sheet_name = sheet_info["sheet"]
         sheet_norm_texts = sheet_info["texts"]
-        
-        # 取得對應的原始資料
         header = raw_data[idx]["header"]
         all_rows = raw_data[idx]["rows"]
         
-        # 處理 Header (重複名稱問題)
         unique_header = []
         seen_counts = {}
         for col in header:
@@ -171,34 +219,23 @@ def execute_yield_search(raw_data, row_texts, configs):
                 new_name = c_str
             unique_header.append(new_name)
             
-        # 開始搜尋該 Sheet 的每一行
         for row_idx, row_str in enumerate(sheet_norm_texts):
             for cfg in prepared_configs:
                 is_match = True
                 for term in cfg['terms']:
                     if term not in row_str:
-                        is_match = False
-                        break
-                
+                        is_match = False; break
                 if is_match:
                     found_display_names.add(cfg['display'])
                     original_row = all_rows[row_idx]
-                    
-                    row_dict = {
-                        "MatchedKeyword": cfg['display'],
-                        "SourceLabel": label,
-                        "SheetName": sheet_name
-                    }
-                    
+                    row_dict = {"MatchedKeyword": cfg['display'], "SourceLabel": label, "SheetName": sheet_name}
                     for h_idx, col_name in enumerate(unique_header):
                         val = original_row[h_idx] if h_idx < len(original_row) else None
                         row_dict[col_name] = val
-                    
                     all_rows_data.append(row_dict)
 
     if all_rows_data:
         df_result = pd.DataFrame(all_rows_data)
-        # 欄位排序
         cols = list(df_result.columns)
         sys_cols = ['MatchedKeyword', 'SourceLabel', 'SheetName']
         other_cols = [c for c in cols if c not in sys_cols]
@@ -208,25 +245,14 @@ def execute_yield_search(raw_data, row_texts, configs):
 
     all_targets = set(c['display'] for c in prepared_configs)
     missing = all_targets - found_display_names
-    
     return df_result, missing
 
 # ==========================================
 # 2. BOM Tool 邏輯
 # ==========================================
-
 PCB_VENDOR_MAP = {"P": "PRV", "S": "SCC", "U": "旭德", "H": "AKM", "D": "科佳"}
 PCB_FINISH_MAP = {"G": "化金", "N": "鎳鈀金", "P": "OSP"}
-
-BASE_OUTPUT_ORDER = [
-    "MPN", "Device Name", "ASIC (簡化 BOM)", "Sensor (簡化 BOM)", "PCB 供應商",
-    "錫膏", "PCB 簡化 BOM", "金屬殼", "電容 / 電組 / 電感", "磁珠", "防水膜 / 金屬網", "Coating"
-]
-
-def unify_key(s):
-    if not isinstance(s, str): return str(s)
-    s = re.sub(r"[\s\(\)\/]", "", s)
-    return s.lower()
+BASE_OUTPUT_ORDER = ["MPN", "Device Name", "ASIC (簡化 BOM)", "Sensor (簡化 BOM)", "PCB 供應商", "錫膏", "PCB 簡化 BOM", "金屬殼", "電容 / 電組 / 電感", "磁珠", "防水膜 / 金屬網", "Coating"]
 
 def format_value(val):
     if pd.isna(val) or val is None: return ""
@@ -235,17 +261,11 @@ def format_value(val):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_bom_files(uploaded_files):
-    """
-    讀取 BOM Excel 檔案
-    """
     raw_data = [] 
     row_texts = [] 
-    
     for file in uploaded_files:
-        # 自動判斷 Label
         name = file.name
         label = "CPC" if "CPC" in name.upper() else ("HELE" if "HELE" in name.upper() else name)
-        
         try:
             wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
             for sheet_name in wb.sheetnames:
@@ -256,29 +276,15 @@ def load_bom_files(uploaded_files):
                     header = rows[0]
                     data_rows = rows[1:]
                     if not data_rows: continue
-                    
-                    raw_data.append({
-                        "label": label,
-                        "sheet": sheet_name,
-                        "header": header,
-                        "rows": data_rows
-                    })
-                    
+                    raw_data.append({"label": label, "sheet": sheet_name, "header": header, "rows": data_rows})
                     current_sheet_texts = []
                     for row in data_rows:
                         joined = "".join([str(c) if c is not None else "" for c in row])
                         current_sheet_texts.append(normalize_str(joined))
-                    
-                    row_texts.append({
-                        "label": label,
-                        "sheet": sheet_name,
-                        "texts": current_sheet_texts
-                    })
+                    row_texts.append({"label": label, "sheet": sheet_name, "texts": current_sheet_texts})
                 except: pass
             wb.close()
-        except Exception as e:
-            print(f"Error loading {label}: {e}")
-            
+        except Exception as e: print(f"Error loading {label}: {e}")
     return raw_data, row_texts
 
 def parse_pcb_details(green_bom):
@@ -296,63 +302,42 @@ def parse_pcb_details(green_bom):
     return details
 
 def get_col_by_keyword(header, keyword, exclude=None):
-    target_key = unify_key(keyword)
+    target_key = normalize_str(keyword)
     for idx, col in enumerate(header):
         col_str = str(col)
-        col_key = unify_key(col_str)
+        col_key = normalize_str(col_str)
         if target_key in col_key:
             if exclude and exclude in col_str: continue
             return idx
     return None
 
 def execute_bom_search(raw_data, row_texts, terms_raw):
-    """
-    執行 BOM 搜尋
-    """
     export_list = []
     found_terms = set()
-    
     norm_terms_map = {t: normalize_str(t) for t in terms_raw}
-    
     for term in terms_raw:
         n_term = norm_terms_map[term]
         if not n_term: continue
-        
-        # 遍歷所有 Sheet
         for idx, sheet_info in enumerate(row_texts):
             sheet_norm_texts = sheet_info["texts"]
             matched_row_idx = -1
-            
-            # 尋找匹配行
             for r_idx, row_str in enumerate(sheet_norm_texts):
                 if n_term in row_str:
-                    matched_row_idx = r_idx
-                    break
-            
+                    matched_row_idx = r_idx; break
             if matched_row_idx != -1:
                 found_terms.add(term)
-                
-                # 提取資料
                 header = raw_data[idx]["header"]
                 row = raw_data[idx]["rows"][matched_row_idx]
                 label = sheet_info["label"]
-                
                 row_data = extract_bom_data(header, row, label, term)
                 export_list.append(row_data)
-
     missing_terms = set(terms_raw) - found_terms
     return export_list, missing_terms
 
 def extract_bom_data(header, row, label, term):
-    row_data = {
-        "Search Term": term,
-        "Source File": label
-    }
+    row_data = {"Search Term": term, "Source File": label}
+    def get_val(idx): return row[idx] if idx is not None and idx < len(row) else None
 
-    def get_val(idx):
-        return row[idx] if idx is not None and idx < len(row) else None
-
-    # PCB 分析邏輯
     pcb_green_idx = get_col_by_keyword(header, "PCB BOM (Green)")
     val_green = get_val(pcb_green_idx)
     pcb_details = parse_pcb_details(val_green)
@@ -361,28 +346,18 @@ def extract_bom_data(header, row, label, term):
     pcb_simple_idx = get_col_by_keyword(header, "PCB 簡化 BOM")
     if not pcb_simple_idx: pcb_simple_idx = get_col_by_keyword(header, "PCB 簡化BOM")
     val_simple = format_value(get_val(pcb_simple_idx))
-    
     if not vendors and val_simple:
         for code, name in PCB_VENDOR_MAP.items():
             if name in val_simple: vendors.append(name)
-
     vendors_str = " / ".join(vendors) if vendors else ""
 
-    # 欄位定義
     LAYOUT_PLAN = [
-        ("MPN", "normal", ["MPN"]),
-        ("Device Name", "normal", ["Device Name"]),
-        ("ASIC (簡化 BOM)", "merge", ["ASIC", "ASIC 簡化BOM"]),
-        ("Sensor (簡化 BOM)", "merge", ["Sensor ID", "Sensor 簡化BOM"]),
-        ("PCB 供應商", "value", vendors_str),
-        ("錫膏", "normal", ["錫膏"]),
-        ("PCB 簡化 BOM", "normal", ["PCB 簡化BOM"]),
-        ("PCB List", "pcb_list", pcb_details),
-        ("金屬殼", "normal", ["金屬殼 BOM (Blue)"]),
-        ("電容 / 電組 / 電感", "normal", ["Indigo"]),
-        ("磁珠", "normal", ["磁珠"]),
-        ("防水膜 / 金屬網", "normal", ["防水膜"]),
-        ("Coating", "normal", ["Coating BOM (Black)"]),
+        ("MPN", "normal", ["MPN"]), ("Device Name", "normal", ["Device Name"]),
+        ("ASIC (簡化 BOM)", "merge", ["ASIC", "ASIC 簡化BOM"]), ("Sensor (簡化 BOM)", "merge", ["Sensor ID", "Sensor 簡化BOM"]),
+        ("PCB 供應商", "value", vendors_str), ("錫膏", "normal", ["錫膏"]),
+        ("PCB 簡化 BOM", "normal", ["PCB 簡化BOM"]), ("PCB List", "pcb_list", pcb_details),
+        ("金屬殼", "normal", ["金屬殼 BOM (Blue)"]), ("電容 / 電組 / 電感", "normal", ["Indigo"]),
+        ("磁珠", "normal", ["磁珠"]), ("防水膜 / 金屬網", "normal", ["防水膜"]), ("Coating", "normal", ["Coating BOM (Black)"]),
     ]
 
     for label_text, type_, args in LAYOUT_PLAN:
@@ -400,349 +375,288 @@ def extract_bom_data(header, row, label, term):
             idx_sub = get_col_by_keyword(header, sub_key)
             val_main = format_value(get_val(idx_main))
             val_sub = format_value(get_val(idx_sub))
-            if val_main and val_sub:
-                final_val = f"{val_main} ({val_sub})" if val_main != val_sub else val_main
+            if val_main and val_sub: final_val = f"{val_main} ({val_sub})" if val_main != val_sub else val_main
             elif val_main: final_val = val_main
             elif val_sub: final_val = val_sub
-        elif type_ == "value":
-            final_val = str(args)
+        elif type_ == "value": final_val = str(args)
         elif type_ == "pcb_list":
             for i, item in enumerate(args, 1):
-                code = item['code']
-                finish = item['finish']
+                code = item['code']; finish = item['finish']
                 display = code + (f" ({finish})" if finish else "")
                 row_data[f"PCB {i}"] = display
             continue
-
         if final_val: row_data[label_text] = final_val
-        
     return row_data
 
 # ==========================================
 # 3. Streamlit UI 主程式
 # ==========================================
 
-# (UI 入口已整合在上方，這裡直接接 Tabs 邏輯)
-tab1, tab2 = st.tabs(["📈 Yield Analysis", "🔍 BOM Search"])
+# 1. 側邊欄 (功能選單)
+with st.sidebar:
+    st.title("功能選單")
+    app_mode = st.radio("Mode", ["Yield Analysis", "BOM Search"], label_visibility="collapsed")
+    st.divider()
+    st.caption("v4.5 Chinese Fixed")
 
-# --- TAB 1: Yield Analysis ---
-with tab1:
-    col_left, col_right = st.columns([1, 2])
+# --- Callbacks ---
+def close_yield_expander():
+    st.session_state['exp_yield_open'] = False
+
+def close_bom_expander():
+    st.session_state['exp_bom_open'] = False
+
+# --- Page 1: Yield Analysis ---
+if app_mode == "Yield Analysis":
     
-    with col_left:
-        st.subheader("1. 檔案與設定")
-        yield_files = st.file_uploader(
-            "上傳 Yield Report (Excel)", 
-            type=['xlsx', 'xls'], 
-            accept_multiple_files=True,
-            key="yield_uploader"
-        )
-        
-        # 搜尋關鍵字
-        raw_search = st.text_area(
-            "關鍵字 (空格=AND, 逗號=OR)", 
-            height=100,
-            placeholder="例如: [Device A], [Device B]\n或: Device A, Device B",
-            help="使用 [] 可以精確比對，例如 [Device Name]。"
-        )
-        chk_space = st.checkbox("空白代表「或」(OR)", value=False, help="勾選後，空白分隔的字詞會變成多個搜尋目標。")
-        
-        btn_search_yield = st.button("開始搜尋", type="primary", key="btn_yield")
+    with st.expander("Yield 檔案載入與搜尋", expanded=st.session_state['exp_yield_open']):
+        c1, c2 = st.columns([1, 1.2])
+        with c1:
+            yield_files = st.file_uploader("1. 上傳 Report", type=['xlsx', 'xls'], accept_multiple_files=True, key="yu")
+            st.caption("自動辨識: HELE / CPC")
+        with c2:
+            raw_search = st.text_area("2. 關鍵字", height=68, placeholder="[Device A], [Device B]...", help="空格=AND, 逗號=OR")
+            cc1, cc2 = st.columns([1, 1])
+            chk_space = cc1.checkbox("空白=OR", value=False)
+            btn_search_yield = cc2.button("搜尋", type="primary", key="by", use_container_width=True, on_click=close_yield_expander)
 
-    # 處理資料讀取 (快取)
-    yield_raw_data = []
-    yield_row_texts = []
+    yield_raw, yield_rows = [], []
+    has_data = False
     
     if yield_files:
-        with st.spinner("讀取檔案中..."):
-            yield_raw_data, yield_row_texts, sheet_count = load_yield_files(yield_files)
-        if sheet_count > 0:
-            col_left.success(f"已載入 {len(yield_files)} 個檔案，共 {sheet_count} 個 Sheet")
-    
-    with col_right:
-        st.subheader("2. 分析儀表板")
-        
-        # 檢查 Session State 是否有搜尋結果
-        if btn_search_yield and yield_files:
-            if not raw_search.strip():
-                st.warning("請輸入關鍵字")
-            else:
-                configs = parse_search_config(raw_search, chk_space)
-                with st.spinner("搜尋運算中..."):
-                    df_res, missing = execute_yield_search(yield_raw_data, yield_row_texts, configs)
-                
-                if missing:
-                    st.error(f"⚠️ 未找到: {', '.join(missing)}")
-                
-                if not df_res.empty:
-                    st.success(f"找到 {len(df_res)} 筆資料")
-                    # 嘗試自動轉換日期欄位 (為了後續篩選)
-                    for col in df_res.columns:
-                        if "DATE" in col.upper() or "TIME" in col.upper() or "日期" in col:
-                            try:
-                                df_res[col] = pd.to_datetime(df_res[col], errors='coerce')
-                            except: pass
-                    st.session_state['yield_result'] = df_res
-                else:
-                    st.info("無符合資料")
-                    st.session_state['yield_result'] = pd.DataFrame()
+        current_files_key = ",".join([f"{f.name}-{f.size}" for f in yield_files])
+        if st.session_state.get('last_yield_key') != current_files_key:
+            with st.spinner("Loading..."): 
+                yield_raw, yield_rows, sht_cnt = load_yield_files(yield_files)
+            st.session_state['yield_cache'] = (yield_raw, yield_rows, sht_cnt)
+            st.session_state['last_yield_key'] = current_files_key
+            st.toast(f"已載入 {len(yield_files)} 檔, {sht_cnt} Sheets", icon="✅")
+        else:
+            yield_raw, yield_rows, sht_cnt = st.session_state.get('yield_cache', ([], [], 0))
+        has_data = True
+    elif 'yield_cache' in st.session_state:
+        yield_raw, yield_rows, sht_cnt = st.session_state['yield_cache']
+        if yield_raw:
+            st.info(f"ℹ️ 使用已快取的資料 (共 {sht_cnt} Sheets)")
+            has_data = True
 
-        # --- 若有資料，顯示進階儀表板 ---
-        if 'yield_result' in st.session_state and not st.session_state['yield_result'].empty:
-            full_df = st.session_state['yield_result']
-            
-            # === 區域 A: 資料篩選 ===
-            with st.expander("🔻 資料篩選器 (Filter)", expanded=True):
-                f_col1, f_col2, f_col3 = st.columns(3)
-                
-                # 1. 關鍵字篩選
-                all_keywords = ["(全部)"] + sorted(list(full_df['MatchedKeyword'].unique()))
-                sel_keyword = f_col1.selectbox("搜尋對象", all_keywords)
-                
-                # 2. Sheet 篩選
-                all_sheets = ["(全部)"] + sorted(list(full_df['SheetName'].unique()))
-                sel_sheet = f_col2.selectbox("Sheet", all_sheets)
-                
-                # 3. 時間篩選
-                date_cols = [c for c in full_df.columns if pd.api.types.is_datetime64_any_dtype(full_df[c])]
-                sel_date_col = f_col3.selectbox("時間欄位", ["(不篩選)"] + date_cols)
-                
-                # 執行篩選邏輯
-                filtered_df = full_df.copy()
-                if sel_keyword != "(全部)":
-                    filtered_df = filtered_df[filtered_df['MatchedKeyword'] == sel_keyword]
-                if sel_sheet != "(全部)":
-                    filtered_df = filtered_df[filtered_df['SheetName'] == sel_sheet]
-                
-                if sel_date_col != "(不篩選)":
-                    min_date = filtered_df[sel_date_col].min()
-                    max_date = filtered_df[sel_date_col].max()
-                    if pd.notnull(min_date) and pd.notnull(max_date):
-                        start_d, end_d = st.date_input(
-                            "選擇日期區間",
-                            value=(min_date, max_date),
-                            min_value=min_date,
-                            max_value=max_date
-                        )
-                        filtered_df = filtered_df[
-                            (filtered_df[sel_date_col].dt.date >= start_d) & 
-                            (filtered_df[sel_date_col].dt.date <= end_d)
-                        ]
-
-                st.caption(f"目前顯示: {len(filtered_df)} 筆 (總共 {len(full_df)} 筆)")
-
-            # === 區域 B: 分頁顯示 ===
-            sub_t1, sub_t2 = st.tabs(["📋 詳細數據", "📊 統計分析"])
-            
-            with sub_t1:
-                st.dataframe(filtered_df, use_container_width=True)
-                
-                # Excel 下載
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    unique_sheets_export = filtered_df['SheetName'].unique()
-                    for s_name in unique_sheets_export:
-                        sub_df_export = filtered_df[filtered_df['SheetName'] == s_name]
-                        sub_df_export = sub_df_export.dropna(axis=1, how='all')
-                        safe_name = str(s_name)[:30]
-                        sub_df_export.to_excel(writer, sheet_name=safe_name, index=False)
-                
-                st.download_button(
-                    label="📥 下載 Excel 結果",
-                    data=buffer.getvalue(),
-                    file_name="yield_result.xlsx",
-                    mime="application/vnd.ms-excel"
-                )
-
-            with sub_t2:
-                # 統計圖表
-                num_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
-                all_cols = filtered_df.columns.tolist()
-                
-                chart_mode = st.radio("圖表模式", ["單軸圖表 (Standard)", "雙軸組合圖 (Combo)"], horizontal=True)
-                
-                fig, ax = plt.subplots(figsize=(8, 4))
-                has_plot = False
-                
-                if chart_mode == "單軸圖表 (Standard)":
-                    c1, c2, c3, c4 = st.columns(4)
-                    chart_type = c1.selectbox("類型", ["Bar", "Line", "Pie", "Scatter"])
-                    x_axis = c2.selectbox("X 軸", all_cols, index=0)
-                    y_axis = c3.selectbox("Y 軸", ["(計數)"] + num_cols, index=0)
-                    sort_col = c4.selectbox("排序依據", ["(X軸自動)", "(Y軸數值)"] + all_cols)
-                    
-                    if st.button("繪製圖表", key="btn_std_chart"):
-                        plot_df = filtered_df.copy()
-                        if sort_col == "(X軸自動)":
-                            plot_df = plot_df.sort_values(by=x_axis)
-                        elif sort_col == "(Y軸數值)" and y_axis != "(計數)":
-                            plot_df = plot_df.sort_values(by=y_axis)
-                        elif sort_col in plot_df.columns:
-                            plot_df = plot_df.sort_values(by=sort_col)
-
-                        if y_axis == "(計數)":
-                            data = plot_df[x_axis].value_counts(sort=False)
-                            if sort_col == "(X軸自動)": data = data.sort_index()
-                        else:
-                            plot_df[y_axis] = pd.to_numeric(plot_df[y_axis], errors='coerce').fillna(0)
-                            data = plot_df.groupby(x_axis)[y_axis].mean()
-                        
-                        color = '#007AFF'
-                        if chart_type == "Bar": data.plot(kind='bar', ax=ax, color=color)
-                        elif chart_type == "Line": data.plot(kind='line', marker='o', ax=ax, color=color)
-                        elif chart_type == "Pie": 
-                            data.plot(kind='pie', autopct='%1.1f%%', ax=ax)
-                            ax.set_ylabel('')
-                        elif chart_type == "Scatter":
-                            ax.scatter(plot_df[x_axis], plot_df[y_axis], color=color)
-                            
-                        ax.set_title(f"{y_axis} by {x_axis}")
-                        has_plot = True
-
-                else: # Combo
-                    c1, c2, c3 = st.columns(3)
-                    x_axis = c1.selectbox("X 軸 (分組)", all_cols, index=0)
-                    c_left1, c_left2 = c2.columns(2)
-                    y1_axis = c_left1.selectbox("左軸數值 (Y1)", num_cols, index=0 if len(num_cols)>0 else 0)
-                    y1_type = c_left2.selectbox("左軸類型", ["Bar", "Line", "Area"])
-                    c_right1, c_right2 = c3.columns(2)
-                    y2_axis = c_right1.selectbox("右軸數值 (Y2)", num_cols, index=1 if len(num_cols)>1 else 0)
-                    y2_type = c_right2.selectbox("右軸類型", ["Line", "Bar", "Area"])
-
-                    if st.button("繪製組合圖", key="btn_combo_chart"):
-                        plot_df = filtered_df.copy()
-                        try: plot_df = plot_df.sort_values(by=x_axis)
+    if btn_search_yield and has_data:
+        if not raw_search.strip(): st.warning("請輸入關鍵字")
+        else:
+            cfgs = parse_search_config(raw_search, chk_space)
+            with st.spinner("Searching..."): df_res, mis = execute_yield_search(yield_raw, yield_rows, cfgs)
+            if mis: st.error(f"Missing: {', '.join(mis)}")
+            if not df_res.empty:
+                for c in df_res.columns:
+                    if "DATE" in c.upper() or "TIME" in c.upper() or "日期" in c:
+                        try: df_res[c] = pd.to_datetime(df_res[c], errors='coerce')
                         except: pass
-                        
-                        plot_df[y1_axis] = pd.to_numeric(plot_df[y1_axis], errors='coerce').fillna(0)
-                        plot_df[y2_axis] = pd.to_numeric(plot_df[y2_axis], errors='coerce').fillna(0)
-                        
-                        g = plot_df.groupby(x_axis).agg({y1_axis:'mean', y2_axis:'mean'}).reset_index()
-                        x_data = g[x_axis].astype(str).tolist()
-                        y1_data = g[y1_axis].tolist()
-                        y2_data = g[y2_axis].tolist()
-                        
-                        color1 = '#0A84FF'
-                        if y1_type == "Bar": ax.bar(x_data, y1_data, color=color1, alpha=0.6, label=y1_axis)
-                        elif y1_type == "Line": ax.plot(x_data, y1_data, color=color1, marker='o', label=y1_axis)
-                        elif y1_type == "Area": ax.fill_between(x_data, y1_data, color=color1, alpha=0.4, label=y1_axis)
-                        ax.set_ylabel(y1_axis, color=color1, fontweight='bold')
-                        ax.tick_params(axis='y', labelcolor=color1)
-                        ax.set_xticklabels(x_data, rotation=45, ha='right')
-
-                        ax2 = ax.twinx()
-                        color2 = '#FF453A'
-                        if y2_type == "Bar": ax2.bar(x_data, y2_data, color=color2, alpha=0.6, width=0.4, label=y2_axis)
-                        elif y2_type == "Line": ax2.plot(x_data, y2_data, color=color2, marker='s', linewidth=2, label=y2_axis)
-                        elif y2_type == "Area": ax2.fill_between(x_data, y2_data, color=color2, alpha=0.3, label=y2_axis)
-                        ax2.set_ylabel(y2_axis, color=color2, fontweight='bold')
-                        ax2.tick_params(axis='y', labelcolor=color2)
-                        
-                        ax.set_title(f"{y1_axis} & {y2_axis} by {x_axis}")
-                        lines1, labels1 = ax.get_legend_handles_labels()
-                        lines2, labels2 = ax2.get_legend_handles_labels()
-                        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-                        has_plot = True
-
-                if has_plot:
-                    plt.tight_layout()
-                    st.pyplot(fig)
-
-
-# --- TAB 2: BOM Search ---
-with tab2:
-    col_b_left, col_b_right = st.columns([1, 2])
-    
-    with col_b_left:
-        st.subheader("1. BOM 檔案設定")
-        bom_files = st.file_uploader(
-            "上傳 BOM 對應表 (Excel)", 
-            type=['xlsx', 'xls'], 
-            accept_multiple_files=True,
-            key="bom_uploader"
-        )
-        
-        st.info("系統會自動依檔名辨識 Label (HELE/CPC/其他)")
-        
-        bom_input = st.text_area("輸入料號 (支援 Excel 整欄貼上)", height=150)
-        chk_bom_space = st.checkbox("空白分隔 (Split by space)", value=False, key="bom_space")
-        
-        btn_search_bom = st.button("開始比對", type="primary", key="btn_bom")
-
-    # 載入 BOM (快取)
-    bom_raw_data = []
-    bom_row_texts = []
-    if bom_files:
-        with st.spinner("建立 BOM 索引..."):
-            bom_raw_data, bom_row_texts = load_bom_files(bom_files)
-        if bom_raw_data:
-            col_b_left.success(f"已載入 {len(bom_files)} 個 BOM 檔")
-
-    with col_b_right:
-        st.subheader("2. 比對結果")
-        
-        if btn_search_bom and bom_files:
-            if not bom_input.strip():
-                st.warning("請輸入料號")
+                st.session_state['yield_result'] = df_res
             else:
-                # 解析輸入
-                sep = r'[,\n\r\t\s，;]+' if chk_bom_space else r'[,\n\r\t，;]+'
-                terms_raw = re.split(sep, bom_input)
-                clean_terms = [t.strip() for t in terms_raw if t.strip()]
-                clean_terms = list(dict.fromkeys(clean_terms)) # 去重
+                st.info("無符合資料")
+                st.session_state['yield_result'] = pd.DataFrame()
+    elif btn_search_yield and not has_data:
+        st.error("請先上傳檔案")
+
+    if 'yield_result' in st.session_state and not st.session_state['yield_result'].empty:
+        full_df = st.session_state['yield_result']
+        
+        with st.expander("資料篩選", expanded=True):
+            fc1, fc2, fc3 = st.columns(3)
+            sel_kw = fc1.selectbox("對象", ["(全部)"] + sorted(list(full_df['MatchedKeyword'].unique())))
+            sel_sht = fc2.selectbox("Sheet", ["(全部)"] + sorted(list(full_df['SheetName'].unique())))
+            dcols = [c for c in full_df.columns if pd.api.types.is_datetime64_any_dtype(full_df[c])]
+            sel_date = fc3.selectbox("時間", ["(無)"] + dcols)
+            
+            fdf = full_df.copy()
+            if sel_kw != "(全部)": fdf = fdf[fdf['MatchedKeyword'] == sel_kw]
+            if sel_sht != "(全部)": fdf = fdf[fdf['SheetName'] == sel_sht]
+            if sel_date != "(無)":
+                dmin, dmax = fdf[sel_date].min(), fdf[sel_date].max()
+                if pd.notnull(dmin) and pd.notnull(dmax):
+                    sd, ed = st.date_input("區間", value=(dmin, dmax), min_value=dmin, max_value=dmax)
+                    fdf = fdf[(fdf[sel_date].dt.date >= sd) & (fdf[sel_date].dt.date <= ed)]
+            
+            if sel_kw != "(全部)" or sel_sht != "(全部)": fdf = fdf.dropna(axis=1, how='all')
+            curr = fdf.columns.tolist()
+            sys = ['MatchedKeyword', 'SourceLabel', 'SheetName']
+            fsys = [c for c in sys if c in curr]
+            fdata = [c for c in curr if c not in sys]
+            fdf = fdf[fsys + fdata]
+            st.caption(f"Count: {len(fdf)}")
+
+        t1, t2 = st.tabs(["詳細數據", "統計圖表"])
+        
+        with t1:
+            st.dataframe(fdf, use_container_width=True)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                font = Font(bold=True, color="FFFFFF")
+                fill = PatternFill("solid", fgColor="4472C4")
+                for s in fdf['SheetName'].unique():
+                    sub = fdf[fdf['SheetName']==s].dropna(axis=1, how='all')
+                    sname = str(s)[:30]
+                    sub.to_excel(writer, sheet_name=sname, index=False)
+                    ws = writer.sheets[sname]
+                    for cell in ws[1]:
+                        cell.font = font; cell.fill = fill; cell.alignment = Alignment(horizontal='center')
+                    for col in ws.columns:
+                        mlen = 0
+                        cl = get_column_letter(col[0].column)
+                        for cell in col:
+                            try: mlen = max(mlen, len(str(cell.value)))
+                            except: pass
+                        ws.column_dimensions[cl].width = min((mlen+2)*1.1, 60)
+            st.download_button("下載 Excel", data=buf.getvalue(), file_name="yield_result.xlsx")
+
+        with t2:
+            ncols = fdf.select_dtypes(include=['number']).columns.tolist()
+            acols = fdf.columns.tolist()
+            dcols_sort = [c for c in acols if pd.api.types.is_datetime64_any_dtype(fdf[c]) or "DATE" in c.upper() or "TIME" in c.upper() or "日期" in c]
+            sort_opts = ["(X軸預設值)"] + dcols_sort + [c for c in acols if c not in dcols_sort]
+
+            def agg_fn(df, x, y, f):
+                if f == "計數 (Count)": return df[x].value_counts().sort_index().reset_index(name='Count').rename(columns={'index':x, x:x})
+                d = df.copy(); d[y] = pd.to_numeric(d[y], errors='coerce').fillna(0)
+                if f == "平均 (Mean)": return d.groupby(x)[y].mean().reset_index()
+                elif f == "加總 (Sum)": return d.groupby(x)[y].sum().reset_index()
+                elif f == "最大值 (Max)": return d.groupby(x)[y].max().reset_index()
+                return d
+
+            def sort_fn(pdf, x, sc, odf):
+                if sc == "(X軸預設值)" or sc not in odf.columns:
+                    try: return pdf.sort_values(by=x)
+                    except: return pdf
+                m = pd.merge(pdf, odf.groupby(x)[sc].min().reset_index(), on=x, how='left')
+                return m.sort_values(by=sc)
+
+            mc1, mc2 = st.columns([1, 1])
+            mode = mc1.radio("模式", ["單軸", "雙軸"], horizontal=True, label_visibility="collapsed")
+            scol = mc2.selectbox("排序依據", sort_opts)
+            st.divider()
+
+            fig = None
+            if mode == "單軸":
+                pc1, pc2, pc3, pc4 = st.columns(4)
+                ptype = pc1.selectbox("類型", ["Bar","Line","Pie","Scatter"])
+                pxax = pc2.selectbox("X", acols)
+                pfunc = pc4.selectbox("算", ["平均 (Mean)","加總 (Sum)","最大值 (Max)","計數 (Count)"])
+                pyax = "(Count)" if pfunc=="計數 (Count)" else pc3.selectbox("Y", ncols)
                 
-                st.write(f"搜尋 {len(clean_terms)} 筆料號...")
+                if st.button("繪圖", key="draw1", use_container_width=True):
+                    pdf = fdf[pxax].value_counts().reset_index(name='Count') if pfunc=="計數 (Count)" else agg_fn(fdf, pxax, pyax, pfunc)
+                    if pfunc=="計數 (Count)": pdf.columns = [pxax, 'Count']; yname='Count'
+                    else: yname=pyax
+                    pdf = sort_fn(pdf, pxax, scol, fdf)
+                    tt = f"{pfunc} - {yname} by {pxax}"
+                    if ptype=="Bar": fig=px.bar(pdf, x=pxax, y=yname, title=tt, text_auto='.2s')
+                    elif ptype=="Line": fig=px.line(pdf, x=pxax, y=yname, markers=True, title=tt)
+                    elif ptype=="Pie": fig=px.pie(pdf, names=pxax, values=yname, title=tt)
+                    elif ptype=="Scatter": fig=px.scatter(pdf, x=pxax, y=yname, title=tt)
+
+            else: # Combo
+                cc1, cc2, cc3 = st.columns(3)
+                cxax = cc1.selectbox("X", acols)
+                with cc2:
+                    st.caption("左軸")
+                    cy1t = st.selectbox("圖", ["Bar","Line"], key="cy1t")
+                    cf1 = st.selectbox("算", ["平均 (Mean)","加總 (Sum)","最大值 (Max)","計數 (Count)"], key="cf1")
+                    cy1 = "Count" if cf1=="計數 (Count)" else st.selectbox("值", ncols, key="cy1")
+                with cc3:
+                    st.caption("右軸")
+                    cy2t = st.selectbox("圖", ["Line","Bar"], key="cy2t")
+                    cf2 = st.selectbox("算", ["平均 (Mean)","加總 (Sum)","最大值 (Max)","計數 (Count)"], key="cf2")
+                    cy2 = "Count" if cf2=="計數 (Count)" else st.selectbox("值", ncols, index=1 if len(ncols)>1 else 0, key="cy2")
+
+                if st.button("繪圖", key="draw2", use_container_width=True):
+                    d1 = agg_fn(fdf, cxax, cy1, cf1)
+                    d2 = agg_fn(fdf, cxax, cy2, cf2)
+                    n1 = "Count" if cf1=="計數 (Count)" else cy1
+                    n2 = "Count" if cf2=="計數 (Count)" else cy2
+                    if n1==n2: 
+                        d1.rename(columns={n1:n1+"_L"}, inplace=True); n1+="_L"
+                        d2.rename(columns={n2:n2+"_R"}, inplace=True); n2+="_R"
+                    
+                    m = pd.merge(d1, d2, on=cxax, how='outer').fillna(0)
+                    m = sort_fn(m, cxax, scol, fdf)
+                    
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    t1 = go.Bar(x=m[cxax], y=m[n1], name=f"{n1}({cf1})", marker_color='#007AFF', opacity=0.7) if cy1t=="Bar" else go.Scatter(x=m[cxax], y=m[n1], name=f"{n1}({cf1})", mode='lines+markers', line=dict(color='#007AFF'))
+                    fig.add_trace(t1, secondary_y=False)
+                    t2 = go.Bar(x=m[cxax], y=m[n2], name=f"{n2}({cf2})", marker_color='#FF453A', opacity=0.7) if cy2t=="Bar" else go.Scatter(x=m[cxax], y=m[n2], name=f"{n2}({cf2})", mode='lines+markers', line=dict(color='#FF453A', width=3))
+                    fig.add_trace(t2, secondary_y=True)
+                    fig.update_layout(title=f"{cf1} vs {cf2}", hovermode="x unified", legend=dict(orientation="h", y=1.02))
+                    fig.update_yaxes(title=n1, secondary_y=False); fig.update_yaxes(title=n2, secondary_y=True)
+
+            if fig: st.plotly_chart(fig, use_container_width=True)
+
+
+# --- Page 2: BOM Search ---
+elif app_mode == "BOM Search":
+    
+    with st.expander("BOM 檔案載入與搜尋", expanded=st.session_state['exp_bom_open']):
+        c1, c2 = st.columns([1, 1.2])
+        with c1:
+            bom_files = st.file_uploader("1. 上傳 BOM", type=['xlsx', 'xls'], accept_multiple_files=True, key="bu")
+        with c2:
+            bom_input = st.text_area("2. 料號", height=68)
+            cc1, cc2 = st.columns([1, 1])
+            chk_b_space = cc1.checkbox("空白分隔", key="bs")
+            btn_bom = cc2.button("比對", type="primary", use_container_width=True, on_click=close_bom_expander)
+
+    # === [關鍵修改] 智慧快取邏輯 (BOM) ===
+    bom_raw, bom_rows = [], []
+    has_bom_data = False
+    
+    if bom_files:
+        current_bom_key = ",".join([f"{f.name}-{f.size}" for f in bom_files])
+        if st.session_state.get('last_bom_key') != current_bom_key:
+            with st.spinner("Indexing..."): 
+                bom_raw, bom_rows = load_bom_files(bom_files)
+            st.session_state['bom_cache'] = (bom_raw, bom_rows)
+            st.session_state['last_bom_key'] = current_bom_key
+            st.toast(f"BOM Index Ready: {len(bom_files)} files", icon="✅")
+        else:
+            bom_raw, bom_rows = st.session_state.get('bom_cache', ([], []))
+        has_bom_data = True
+    elif 'bom_cache' in st.session_state:
+        bom_raw, bom_rows = st.session_state['bom_cache']
+        if bom_raw:
+            st.info("ℹ️ 使用已快取的 BOM 資料")
+            has_bom_data = True
+
+    if btn_bom and has_bom_data:
+        if not bom_input.strip(): st.warning("請輸入料號")
+        else:
+            sep = r'[,\n\r\t\s，;]+' if chk_b_space else r'[,\n\r\t，;]+'
+            terms = list(dict.fromkeys([t.strip() for t in re.split(sep, bom_input) if t.strip()]))
+            st.caption(f"Searching {len(terms)} items...")
+            
+            with st.spinner("Searching..."): res, missing = execute_bom_search(bom_raw, bom_rows, terms)
+            
+            if missing: st.error(f"Missing: {', '.join(missing)}")
+            else: st.success("All Found!")
+            
+            if res:
+                dfb = pd.DataFrame(res)
+                mpcb = 0
+                for r in res:
+                    for k in r.keys():
+                        if k.startswith("PCB ") and k[4:].isdigit(): mpcb = max(mpcb, int(k[4:]))
                 
-                with st.spinner("比對中..."):
-                    res_list, missing_terms = execute_bom_search(bom_raw_data, bom_row_texts, clean_terms)
+                hdrs = ["Search Term", "Source File"]
+                bo = list(BASE_OUTPUT_ORDER)
+                try: idx = bo.index("PCB 簡化 BOM") + 1
+                except: idx = len(bo)
+                fcols = hdrs + bo[:idx] + [f"PCB {i}" for i in range(1, mpcb+1)] + bo[idx:]
+                dfb = dfb.reindex(columns=fcols)
                 
-                if missing_terms:
-                    st.error(f"⚠️ 未找到 ({len(missing_terms)}): {', '.join(missing_terms)}")
-                else:
-                    st.success("✅ 全部找到！")
-                
-                if res_list:
-                    # 整理 DataFrame
-                    df_bom = pd.DataFrame(res_list)
-                    
-                    # 動態排序與 PCB 欄位處理
-                    max_pcb = 0
-                    for row in res_list:
-                        for k in row.keys():
-                            if k.startswith("PCB ") and k[4:].isdigit():
-                                max_pcb = max(max_pcb, int(k[4:]))
-                    
-                    final_headers = ["Search Term", "Source File"]
-                    # 嘗試插入 PCB 欄位
-                    base_order = list(BASE_OUTPUT_ORDER) # copy
-                    try: 
-                        ins_idx = base_order.index("PCB 簡化 BOM") + 1
-                    except: 
-                        ins_idx = len(base_order)
-                        
-                    pcb_cols = [f"PCB {i}" for i in range(1, max_pcb + 1)]
-                    
-                    final_cols = final_headers + base_order[:ins_idx] + pcb_cols + base_order[ins_idx:]
-                    
-                    # Reindex
-                    df_bom = df_bom.reindex(columns=final_cols)
-                    
-                    st.dataframe(df_bom, use_container_width=True)
-                    
-                    # 匯出
-                    buffer_bom = io.BytesIO()
-                    with pd.ExcelWriter(buffer_bom, engine='openpyxl') as writer:
-                        df_bom.to_excel(writer, index=False, sheet_name='Search Results')
-                        
-                        # 自動調整欄寬 (簡易版)
-                        ws = writer.sheets['Search Results']
-                        for column in ws.columns:
-                            col_letter = get_column_letter(column[0].column)
-                            ws.column_dimensions[col_letter].width = 20
-                            
-                    st.download_button(
-                        label="📥 下載 BOM 結果",
-                        data=buffer_bom.getvalue(),
-                        file_name="BOM_Result.xlsx",
-                        mime="application/vnd.ms-excel"
-                    )
+                st.dataframe(dfb, use_container_width=True)
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine='openpyxl') as w:
+                    dfb.to_excel(w, index=False, sheet_name='Res')
+                    for c in w.sheets['Res'].columns: 
+                        w.sheets['Res'].column_dimensions[get_column_letter(c[0].column)].width = 20
+                st.download_button("下載 BOM 結果", data=buf.getvalue(), file_name="BOM_Result.xlsx")
+    elif btn_bom and not has_bom_data:
+        st.error("請先上傳 BOM 檔案")
